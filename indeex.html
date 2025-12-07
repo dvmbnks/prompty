@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Prompty v1.1 - Focus Edition</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #ffffff; color: black; margin: 0; overflow: hidden; }
+        .font-mono { font-family: 'JetBrains Mono', monospace; }
+        
+        /* --- ANIMATIONS --- */
+        @keyframes breathe {
+            0%, 100% { transform: scale(1); opacity: 0.8; }
+            50% { transform: scale(1.05); opacity: 1; }
+        }
+        .animate-breathe { animation: breathe 4s infinite ease-in-out; }
+
+        @keyframes blink {
+            0%, 96%, 100% { transform: scaleY(1); }
+            98% { transform: scaleY(0.1); }
+        }
+        .animate-blink { animation: blink 4s infinite; }
+        
+        @keyframes floatZ {
+            0% { transform: translate(0, 0) scale(0.5); opacity: 0; }
+            50% { opacity: 1; }
+            100% { transform: translate(20px, -40px) scale(1.2); opacity: 0; }
+        }
+        .zzz { animation: floatZ 2s infinite ease-in; position: absolute; font-weight: bold; }
+
+        .scanlines {
+            background: linear-gradient(to bottom, rgba(0,0,0,0), rgba(0,0,0,0) 50%, rgba(0,0,0,0.05) 50%, rgba(0,0,0,0.05));
+            background-size: 100% 4px; 
+            pointer-events: none;
+        }
+
+        .dot-bounce { animation: bounce 1s infinite; }
+        @keyframes bounce {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-10px); }
+        }
+        @keyframes wave {
+            0%, 100% { height: 10px; }
+            50% { height: 50px; }
+        }
+
+        .voice-bar {
+            width: 12px;
+            background: #000000;
+            border-radius: 99px;
+            animation: wave 0.4s ease-in-out infinite;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // --- CONFIGURATION ---
+        const HARDCODED_GROQ_KEY = "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"; 
+        const SLEEP_TIMEOUT_MS = 30000; 
+
+        // --- ICONS ---
+        const IconWrapper = ({ children, size = 24, className = "" }) => (
+            <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>{children}</svg>
+        );
+        const Send = (props) => <IconWrapper {...props}><line x1="22" x2="11" y1="2" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></IconWrapper>;
+        const Mic = (props) => <IconWrapper {...props}><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></IconWrapper>;
+        const MicOff = (props) => <IconWrapper {...props}><line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><path d="M15 9.34V4a3 3 0 0 0-5.94-.6"/></IconWrapper>;
+
+        const DeskPetSimulator = () => {
+            const [state, setState] = useState('IDLE'); // Visual State: IDLE, THINKING, SPEAKING, HAPPY, SLEEP
+            const [inputText, setInputText] = useState("");
+            
+            // Focus Mode State
+            const [focusTimeLeft, setFocusTimeLeft] = useState(0);
+            
+            // Audio/Mic State
+            const [micActive, setMicActive] = useState(false);
+            const [micVolume, setMicVolume] = useState(0);
+            const audioContextRef = useRef(null);
+            const analyserRef = useRef(null);
+            
+            // OS State
+            const [lastInteraction, setLastInteraction] = useState(Date.now());
+            const [history, setHistory] = useState([]);
+            const [selectedVoiceURI, setSelectedVoiceURI] = useState("");
+            const [savedNotes, setSavedNotes] = useState([]);
+
+            // --- 1. SLEEP WATCHDOG (Background Task) ---
+            useEffect(() => {
+                const interval = setInterval(() => {
+                    if (focusTimeLeft > 0) return; // NEVER sleep if timer is running
+                    if (state === 'SLEEP') return; // Already asleep
+                    if (state === 'SPEAKING' || state === 'THINKING') return; // Don't sleep if busy
+                    
+                    if (Date.now() - lastInteraction > SLEEP_TIMEOUT_MS) {
+                        setState('SLEEP');
+                    }
+                }, 1000);
+                return () => clearInterval(interval);
+            }, [lastInteraction, state, focusTimeLeft]);
+
+            // Wake up on interaction
+            const wakeUp = () => {
+                setLastInteraction(Date.now());
+                if (state === 'SLEEP') {
+                    setState('IDLE');
+                    speak("System rebooting. I'm awake.");
+                }
+            };
+
+            // --- 2. FOCUS MODE TIMER (INDEPENDENT LOGIC) ---
+            useEffect(() => {
+                let interval = null;
+                // Run timer if time > 0, regardless of what the face is doing
+                if (focusTimeLeft > 0) {
+                    interval = setInterval(() => {
+                        setFocusTimeLeft((prev) => {
+                            if (prev <= 1) {
+                                speak("Focus session complete. Good job.");
+                                return 0;
+                            }
+                            return prev - 1;
+                        });
+                    }, 1000);
+                }
+                return () => clearInterval(interval);
+            }, [focusTimeLeft]);
+
+            // --- 3. MICROPHONE VISUALIZER ---
+            const toggleMic = async () => {
+                wakeUp();
+                if (micActive) {
+                    setMicActive(false);
+                    if (audioContextRef.current) audioContextRef.current.close();
+                    setMicVolume(0);
+                    return;
+                }
+
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                    const analyser = audioCtx.createAnalyser();
+                    const source = audioCtx.createMediaStreamSource(stream);
+                    
+                    source.connect(analyser);
+                    analyser.fftSize = 32;
+                    
+                    audioContextRef.current = audioCtx;
+                    analyserRef.current = analyser;
+                    setMicActive(true);
+                    
+                    const dataArray = new Uint8Array(analyser.frequencyBinCount);
+                    const updateVolume = () => {
+                        if (analyserRef.current) {
+                            analyserRef.current.getByteFrequencyData(dataArray);
+                            const avg = dataArray.reduce((a, b) => a + b) / dataArray.length;
+                            setMicVolume(avg); // 0 to 255
+                        }
+                        requestAnimationFrame(updateVolume);
+                    };
+                    updateVolume();
+                } catch (e) {
+                    alert("Mic permission denied or not found.");
+                }
+            };
+
+            // --- INIT & VOICES ---
+             useEffect(() => {
+                const loadVoices = () => {
+                    const voices = window.speechSynthesis.getVoices();
+                    if (voices.length > 0) {
+                        let preferred = voices.find(v => v.name.includes('Microsoft Jenny') || v.name.includes('Jenny'));
+                        if (!preferred) preferred = voices.find(v => v.name.includes('Natural'));
+                        if (!preferred) preferred = voices.find(v => v.lang.includes('en-US'));
+
+                        if (preferred) setSelectedVoiceURI(preferred.voiceURI);
+                        else setSelectedVoiceURI(voices[0].voiceURI);
+                    }
+                };
+                
+                loadVoices();
+                window.speechSynthesis.onvoiceschanged = loadVoices;
+            }, []);
+
+            // --- TOOLS ---
+            const saveNote = (noteText) => {
+                const newNote = { id: Date.now(), text: noteText };
+                const updated = [...savedNotes, newNote];
+                setSavedNotes(updated);
+                localStorage.setItem('prompty_notes', JSON.stringify(updated));
+            };
+
+            const speak = (text) => {
+                window.speechSynthesis.cancel();
+                const utterance = new SpeechSynthesisUtterance(text);
+                const voices = window.speechSynthesis.getVoices();
+                const voice = voices.find(v => v.voiceURI === selectedVoiceURI);
+                if (voice) utterance.voice = voice;
+                
+                utterance.onstart = () => setState('SPEAKING');
+                utterance.onend = () => setState('IDLE'); 
+                
+                window.speechSynthesis.speak(utterance);
+            };
+
+            const handleSend = async () => {
+                wakeUp();
+                if (!inputText.trim()) return;
+                
+                // --- FOCUS INTERCEPT ---
+                // If Timer is running, intercept mostly everything unless it's "stop"
+                if (focusTimeLeft > 0) {
+                    if (inputText.toLowerCase().includes("stop") || inputText.toLowerCase().includes("cancel")) {
+                        setFocusTimeLeft(0);
+                        speak("Focus mode aborted.");
+                    } else {
+                        speak("I am busy. You should be too.");
+                    }
+                    setInputText("");
+                    return;
+                }
+
+                const userMsg = inputText;
+                const lower = userMsg.toLowerCase();
+                setInputText("");
+                setState('THINKING');
+
+                let systemInjection = "";
+
+                // 1. FOCUS COMMAND
+                if (lower.includes("focus") || lower.includes("timer")) {
+                    const numberMatch = lower.match(/(\d+)/);
+                    let time = numberMatch ? parseInt(numberMatch[0]) : 25;
+                    if (lower.includes("second") || lower.includes("sec") || lower.includes("secs")) {
+                        setFocusTimeLeft(time); // seconds
+                        speak(`Starting focus mode for ${time} seconds.`);
+                    } else {
+                        setFocusTimeLeft(time * 60); // minutes
+                        speak(`Starting focus mode for ${time} minutes.`);
+                    }
+                    return;
+                }
+
+
+                // 2. NOTES COMMAND
+                if (lower.match(/save note|remind me|take a note/i)) {
+                    const noteContent = userMsg.replace(/save note|take a note|remind me to|remind me/gi, "").trim();
+                    saveNote(noteContent);
+                    systemInjection = ` [SYSTEM: Saved note: "${noteContent}"]`;
+                }
+
+                // 3. READ NOTES
+                if (lower.includes("read notes")) {
+                    const notes = savedNotes.map(n => n.text).join(", ");
+                    systemInjection = ` [SYSTEM: Notes: ${notes}]`;
+                }
+
+                // 4. WEATHER
+                if (lower.includes("weather")) {
+                    try {
+                        const r = await fetch("https://api.open-meteo.com/v1/forecast?latitude=40.71&longitude=-74.00&current_weather=true");
+                        const d = await r.json();
+                        systemInjection = ` [SYSTEM: Temp ${d.current_weather.temperature}C]`;
+                    } catch(e) {}
+                }
+
+                // AI BRAIN
+                const newHistory = [...history, {role: "user", content: userMsg + systemInjection}].slice(-6);
+                setHistory(newHistory);
+
+                if (HARDCODED_GROQ_KEY) {
+                    try {
+                        const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${HARDCODED_GROQ_KEY}` },
+                            body: JSON.stringify({
+                                model: "llama-3.1-8b-instant",
+                                messages: [
+                                    {role: "system", content: "You are Prompty. Sarcastic, brief."},
+                                    ...newHistory
+                                ],
+                                max_tokens: 80
+                            })
+                        });
+                        const data = await res.json();
+                        if (data.choices) {
+                            const reply = data.choices[0].message.content;
+                            speak(reply);
+                            setHistory(prev => [...prev, {role: "assistant", content: reply}].slice(-6));
+                        }
+                    } catch (e) { speak("Error."); setState('IDLE'); }
+                }
+            };
+
+            // --- RENDERERS ---
+            const formatTime = (seconds) => {
+                const m = Math.floor(seconds / 60);
+                const s = seconds % 60;
+                return `${m}:${s < 10 ? '0' : ''}${s}`;
+            };
+
+            const renderFace = () => {
+                // 1. SLEEP
+                if (state === 'SLEEP') {
+                    return (
+                        <div className="relative cursor-pointer" onClick={wakeUp}>
+                            <div className="w-24 h-2 bg-black rounded-full mb-4 opacity-50"></div>
+                            <div className="w-24 h-2 bg-black rounded-full opacity-50"></div>
+                            <div className="zzz text-4xl right-0 top-0">Z</div>
+                            <div className="zzz text-2xl right-4 -top-8" style={{animationDelay: '0.5s'}}>Z</div>
+                        </div>
+                    );
+                }
+
+                // 2. LISTENING (Mic Active)
+                if (micActive && state === 'IDLE' && focusTimeLeft === 0) {
+                    const h = Math.max(10, micVolume); 
+                    return (
+                        <div className="flex items-center gap-2 h-32">
+                            <div className="voice-bar bg-slate-800" style={{height: `${h * 0.5}px`}}></div>
+                            <div className="voice-bar bg-black" style={{height: `${h}px`}}></div>
+                            <div className="voice-bar bg-black" style={{height: `${h * 1.5}px`}}></div>
+                            <div className="voice-bar bg-black" style={{height: `${h}px`}}></div>
+                            <div className="voice-bar bg-slate-800" style={{height: `${h * 0.5}px`}}></div>
+                        </div>
+                    );
+                }
+
+                // 3. SPEAKING
+                if (state === 'SPEAKING') {
+                    return (
+                        <div className="flex items-center gap-2 h-32">
+                            {[0, 0.1, 0.2, 0.3, 0.1, 0.4].map((d, i) => (
+                                <div key={i} className="voice-bar" style={{animationDelay: `${d}s`, height: i%2===0?'60px':'30px'}}></div>
+                            ))}
+                        </div>
+                    );
+                }
+
+
+                // 4. THINKING
+                if (state === 'THINKING') {
+                    return (
+                        <div className="flex gap-4">
+                            {[0, 0.1, 0.2].map(d => (
+                                <div key={d} className="w-6 h-6 bg-black rounded-full dot-bounce" style={{animationDelay: `${d}s`}}></div>
+                            ))}
+                        </div>
+                    );
+                }
+
+                // 5. FOCUS (Visual Face)
+                // If timer is running, we show determined eyes, unless speaking/thinking/sleeping
+                if (focusTimeLeft > 0) {
+                     return null;
+                }
+
+                // 6. IDLE / HAPPY
+                return (
+                    <div className="flex gap-16 animate-blink cursor-pointer" onClick={() => { setState('HAPPY'); setTimeout(() => setState('IDLE'), 2000); wakeUp(); }}>
+                         {state === 'HAPPY' ? (
+                            <>
+                                <div className="w-24 h-4 bg-black rounded-full rotate-12 mt-12"></div>
+                                <div className="w-24 h-4 bg-black rounded-full -rotate-12 mt-12"></div>
+                            </>
+                          ) : (
+                            <>
+                                <div className="w-24 h-32 bg-black rounded-full shadow-lg animate-breathe"></div>
+                                <div className="w-24 h-32 bg-black rounded-full shadow-lg animate-breathe"></div>
+                            </>
+                          )}
+                    </div>
+                );
+            };
+
+            return (
+                <div className={`w-screen h-screen transition-colors duration-1000 flex flex-col items-center justify-center relative overflow-hidden text-black ${state === 'SLEEP' ? 'bg-slate-200' : 'bg-white'}`}>
+                    <div className="absolute inset-0 scanlines z-10 pointer-events-none"></div>
+
+                    {/* Mic Toggle */}
+                    <button onClick={toggleMic} className={`absolute top-6 left-6 z-30 p-3 rounded-full transition-all ${micActive ? 'bg-red-100 text-red-600' : 'bg-slate-100 text-slate-400'}`}>
+                        {micActive ? <Mic /> : <MicOff />}
+                    </button>
+
+                    {/* Status Bar */}
+                    <div className="absolute top-6 right-6 flex flex-col items-end gap-2 text-xs text-gray-400 font-mono z-30">
+                        <div>PWR: {state === 'SLEEP' ? 'LOW' : '100%'}</div>
+                    </div>
+
+                    {/* Center everything */}
+                    <div className="absolute inset-0 flex flex-col items-center justify-center">
+                        {focusTimeLeft > 0 ? (
+                            // Focus Mode: only timer, perfectly centered
+                            <div className="flex flex-col items-center justify-center gap-4">
+                                <div className="font-mono text-7xl font-bold tracking-tighter text-black/80">
+                                    {formatTime(focusTimeLeft)}
+                                </div>
+                                <div className="text-xs tracking-[0.2em] font-bold text-red-500 animate-pulse">
+                                    FOCUS ACTIVE
+                                </div>
+                            </div>
+                        ) : (
+                            // Normal face states
+                            renderFace()
+                        )}
+                    </div>
+
+
+                    {/* Input */}
+                    <div className={`absolute bottom-12 w-full max-w-lg px-6 z-20 transition-opacity ${state === 'SLEEP' ? 'opacity-20 hover:opacity-100' : 'opacity-100'}`}>
+                        <div className="relative group">
+                            <input 
+                                type="text" 
+                                className="w-full bg-slate-100/50 border border-slate-300 rounded-full py-4 pl-6 pr-12 text-lg text-black placeholder-slate-400 focus:border-black focus:ring-1 focus:ring-black backdrop-blur-md outline-none transition-all"
+                                placeholder={focusTimeLeft > 0 ? "Type 'stop' to cancel..." : (state === 'SLEEP' ? "Wake up..." : "Talk to Prompty...")}
+                                value={inputText}
+                                onChange={(e) => { wakeUp(); setInputText(e.target.value); }}
+                                onKeyPress={(e) => e.key === 'Enter' && handleSend()}
+                                autoFocus
+                            />
+                            <button onClick={handleSend} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-black transition-colors">
+                                <Send size={24} />
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<DeskPetSimulator />);
+    </script>
+</body>
+</html>
