@@ -284,17 +284,13 @@
 
                 if (HARDCODED_GROQ_KEY) {
                     try {
-                        const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${HARDCODED_GROQ_KEY}` },
-                            body: JSON.stringify({
-                                model: "llama-3.1-8b-instant",
-                                messages: [
-                                    {role: "system", content: "You are Prompty. Sarcastic, brief."},
-                                    ...newHistory
-                                ],
-                                max_tokens: 80
-                            })
+                        const res = await fetch('https://corsproxy.io/?https://api.groq.com/openai/v1/chat/completions', {
+                          method: 'POST',
+                          headers: { 
+                            'Content-Type': 'application/json', 
+                            'Authorization': `Bearer ${HARDCODED_GROQ_KEY}` 
+                          },
+                          body: JSON.stringify({ model: "llama-3.1-8b-instant", messages: [...newHistory], max_tokens: 80 })
                         });
                         const data = await res.json();
                         if (data.choices) {
@@ -445,4 +441,5 @@
         root.render(<DeskPetSimulator />);
     </script>
 </body>
+
 </html>
